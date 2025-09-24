@@ -1,0 +1,53 @@
+
+---
+
+## `.gitignore`
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.dist-info/
+.python-version
+
+# Virtual envs
+.venv/
+venv/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Build / dist / caches
+build/
+dist/
+*.log
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit state
+.streamlit/*.lock
+
+# Chroma vector store (generated; can be big)
+rag_chatbot/chroma/
+
+# Ollama local models (if ever placed under repo by mistake)
+**/ollama_models/
+
+# Misc
+*.swp
+*.swo
