@@ -15,10 +15,15 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
+from pypdf import PdfReader
 
 load_dotenv()
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").strip()
+MODEL = os.getenv("OLLAMA_MODEL", "llama3").strip()
+try:
+    OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+except ValueError:
+    OLLAMA_TIMEOUT = 120.0
 
 HERE = os.path.dirname(__file__)
 DOCS_DIR = os.path.abspath(os.path.join(HERE, "..", "docs"))
@@ -29,6 +34,9 @@ st.title("🔎 RAG Chatbot (Hybrid Retrieval + Citations)")
 st.caption("Semantic + BM25 retrieval → merged & reranked → answer with citations (local & free).")
 
 # ---------------- Utilities ----------------
+SUPPORTED_EXTS = (".md", ".txt", ".pdf")
+
+
 def clean_text(t: str) -> str:
     t = re.sub(r"\s+\n", "\n", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
@@ -59,24 +67,34 @@ PHONE_RE  = re.compile(r"\+?\d[\d \-().]{7,}\d")
 def looks_like_contact(text: str) -> bool:
     return bool(EMAIL_RE.search(text) or URL_RE.search(text) or PHONE_RE.search(text))
 
+
+def _read_pdf(path: str) -> str:
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    except Exception as exc:
+        # Streamlit renders stdout, so surface a gentle warning
+        st.warning(f"Failed to read PDF '{os.path.basename(path)}': {exc}")
+        return ""
+
 # --- Query helpers ---
-ALIASES = {
-    "safe": "password safe",
-    "ps": "password safe",
-}
-CONTACT_TOKENS = ("contact","contacts","support","email","phone","website","help")
+CONTACT_TOKENS = ("contact", "contacts", "support", "email", "phone", "website", "help")
 
 def expand_query(q: str) -> str:
-    ql = q.strip().lower()
-    if ql in ALIASES:
-        # one-word ambiguous → expand semantically
-        return f"What is {ALIASES[ql]}? List key features and capabilities."
-    if len(ql.split()) <= 2:
-        # boost context for tiny queries
-        return f"What does '{ql}' refer to in these docs? Explain briefly."
-    if any(k in ql for k in CONTACT_TOKENS):
-        return q + " contact support email phone website help"
-    return q
+    """Lightweight rewrite to improve recall for specific intents."""
+    q_clean = q.strip()
+    if not q_clean:
+        return q
+    if is_contact_intent(q_clean):
+        return q_clean + " contact support email phone website help"
+    if len(q_clean.split()) <= 2:
+        return f"What information do the docs provide about '{q_clean}'?"
+    return q_clean
 
 def is_contact_intent(q: str) -> bool:
     ql = q.lower()
@@ -100,10 +118,18 @@ def build_bm25_index(docs_dir=DOCS_DIR):
     """Build a lightweight BM25 index over chunked docs (fast, in-memory)."""
     texts, ids, metas = [], [], []
     for path in glob.glob(os.path.join(docs_dir, "**/*"), recursive=True):
-        if os.path.isdir(path) or not path.lower().endswith((".md", ".txt")):
+        if os.path.isdir(path):
             continue
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            raw = clean_text(f.read())
+        lower = path.lower()
+        if not lower.endswith(SUPPORTED_EXTS):
+            continue
+        if lower.endswith(".pdf"):
+            raw = clean_text(_read_pdf(path))
+        else:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                raw = clean_text(f.read())
+        if not raw:
+            continue
         fname = os.path.basename(path)
         for ch in chunk_words(raw, chunk_size=250, overlap=40):
             cid = f"{fname}:{ch['idx']}"
@@ -216,9 +242,6 @@ def combine_hits(sem_hits, lex_hits, q: str, contact_intent: bool, k: int):
     for h in merged.values():
         if contact_intent and looks_like_contact(h["text"]):
             h["bonus"] += 0.10
-        # exact phrase booster for specific product name
-        if re.search(r"\bpassword\s+safe\b", h["text"], flags=re.I):
-            h["bonus"] += 0.08
 
     w_lex, w_sem = _weights_for_query(q)  # dynamic weights
     for h in merged.values():
@@ -249,7 +272,7 @@ def retrieve_hybrid(query: str, k: int, original_q: str):
     # Fail-soft lexical recall if combined confidence is weak
     MIN_CONF = 0.28  # 0.25–0.35 works well; tuned for 0..1 scale
     if top_score < MIN_CONF:
-        lex3 = retrieve_bm25(original_q + " " + ALIASES.get(original_q.lower(), ""), top_n=max(30, k_lex))
+        lex3 = retrieve_bm25(original_q, top_n=max(30, k_lex))
         hits, _ = combine_hits(sem, lex3, original_q, contact_intent, k)
 
     return hits
@@ -265,7 +288,7 @@ def ollama_chat(system: str, user: str) -> str:
         ],
     }
     try:
-        r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=120)
+        r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT)
         r.raise_for_status()
         return r.json()["message"]["content"]
     except requests.exceptions.ConnectionError:
@@ -281,6 +304,7 @@ def make_prompt(query: str, hits):
         "You are a careful, fact-based assistant.\n"
         "Use ONLY the provided context. If the user asks something broad like 'contacts' or 'support', "
         "list any emails, phone numbers, or websites that appear in the context.\n"
+        "Interpret even short or single-word prompts as topics and summarize the most relevant information from the context.\n"
         "If the answer is not in the context, reply exactly: \"I don't know based on these docs.\"\n"
         "Always include short citations like [<filename.md>]."
     )

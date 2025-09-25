@@ -6,7 +6,8 @@
 - Export/Import supported
 - Auto-lock and clipboard auto-clear included
 
-**Support**
-- Email: info@fawzixai.com
-- Website: https://fawzixai.com
-- Phone: +1-555-0100
+**Invoice Reminder**
+- Customizable AI-driven reminder system
+- Automatically sends reminders
+
+
