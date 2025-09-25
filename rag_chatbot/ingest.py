@@ -11,6 +11,7 @@ os.environ.setdefault("CHROMA_TELEMETRY", "false")
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+from pypdf import PdfReader
 
 # Paths
 ROOT = os.path.dirname(__file__)
@@ -19,14 +20,38 @@ CHROMA_DIR = os.environ.get("CHROMA_DIR", os.path.join(ROOT, "chroma"))
 
 # ------------------ loaders & chunking ------------------
 
+SUPPORTED_EXTS = (".md", ".txt", ".pdf")
+
+
+def _read_pdf(path: str) -> str:
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    except Exception as exc:
+        print(f"Warning: failed to read PDF '{path}': {exc}")
+        return ""
+
+
 def read_text_files(docs_dir: str) -> List[Dict]:
     items = []
     for path in glob.glob(os.path.join(docs_dir, "**/*"), recursive=True):
         if os.path.isdir(path):
             continue
-        if path.lower().endswith((".md", ".txt")):
+        lower = path.lower()
+        if not lower.endswith(SUPPORTED_EXTS):
+            continue
+        if lower.endswith(".pdf"):
+            text = _read_pdf(path)
+        else:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                items.append({"name": os.path.basename(path), "text": f.read()})
+                text = f.read()
+        if text.strip():
+            items.append({"name": os.path.basename(path), "text": text})
     return items
 
 def clean_text(t: str) -> str:

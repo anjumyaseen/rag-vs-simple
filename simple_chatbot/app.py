@@ -4,15 +4,36 @@ import textwrap
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from pypdf import PdfReader
 
 load_dotenv()
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").strip()
+MODEL = os.getenv("OLLAMA_MODEL", "llama3").strip()
+try:
+    OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+except ValueError:
+    OLLAMA_TIMEOUT = 120.0
 
 # --- Robust docs path ---
 HERE = os.path.dirname(__file__)
 DEFAULT_DOCS_DIR = os.path.abspath(os.path.join(HERE, "..", "docs"))
 DOCS_DIR = os.environ.get("DOCS_DIR", DEFAULT_DOCS_DIR)
+
+SUPPORTED_EXTS = (".md", ".txt", ".pdf")
+
+
+def _read_pdf(path: str) -> str:
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    except Exception as exc:
+        st.warning(f"Failed to read PDF '{os.path.basename(path)}': {exc}")
+        return ""
 
 st.set_page_config(page_title="Simple Chatbot (No RAG)", page_icon="💬")
 st.title("💬 Simple Chatbot (No RAG)")
@@ -23,9 +44,17 @@ def load_docs_text(docs_dir=DOCS_DIR):
     for path in glob.glob(os.path.join(docs_dir, "**/*"), recursive=True):
         if os.path.isdir(path):
             continue
-        if path.lower().endswith((".md", ".txt")):
+        lower = path.lower()
+        if not lower.endswith(SUPPORTED_EXTS):
+            continue
+        if lower.endswith(".pdf"):
+            text = _read_pdf(path)
+        else:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                parts.append(f"\n\n=== FILE: {os.path.basename(path)} ===\n{f.read()}")
+                text = f.read()
+        if not text.strip():
+            continue
+        parts.append(f"\n\n=== FILE: {os.path.basename(path)} ===\n{text}")
     return "\n".join(parts)[:100_000]
 
 # Load once
@@ -35,23 +64,23 @@ DOCS_TEXT = load_docs_text()
 with st.sidebar.expander("Docs debug", expanded=False):
     st.write(f"Docs dir: `{DOCS_DIR}`")
     files = [p for p in glob.glob(os.path.join(DOCS_DIR, '**/*'), recursive=True)
-             if os.path.isfile(p) and p.lower().endswith(('.md', '.txt'))]
+             if os.path.isfile(p) and p.lower().endswith(SUPPORTED_EXTS)]
     if files:
         st.write("Found files:")
         for p in files:
             st.write("•", os.path.basename(p))
     else:
-        st.warning("No `.md` or `.txt` files found here.")
+        st.warning("No `.md`, `.txt`, or `.pdf` files found here.")
 
 if not DOCS_TEXT:
-    st.warning(f"No docs found under `{DOCS_DIR}`. Add some `.md` or `.txt` files.")
+    st.warning(f"No docs found under `{DOCS_DIR}`. Add some `.md`, `.txt`, or `.pdf` files.")
 
 def ollama_chat(messages):
     try:
         r = requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={"model": MODEL, "stream": False, "messages": messages},
-            timeout=120,
+            timeout=OLLAMA_TIMEOUT,
         )
         r.raise_for_status()
         return r.json()["message"]["content"]
